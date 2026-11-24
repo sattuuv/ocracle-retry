@@ -2,7 +2,7 @@ name: OCI ARM Auto-Retry
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Runs every 30 minutes (change 30 to 10 if repo is Public)
+    - cron: '*/10 * * * *' # Runs every 30 minutes (change 30 to 10 if repo is Public)
   workflow_dispatch:       # Lets you test it manually anytime
 
 jobs:
