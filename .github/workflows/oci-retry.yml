@@ -1,0 +1,73 @@
+name: OCI ARM Auto-Retry
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # Runs every 30 minutes (change 30 to 10 if repo is Public)
+  workflow_dispatch:       # Lets you test it manually anytime
+
+jobs:
+  launch-instance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Configure OCI Credentials
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+          OCI_SSH_PUB_KEY: ${{ secrets.OCI_SSH_PUB_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          cat << EOF > ~/.oci/config
+          [DEFAULT]
+          user=$OCI_USER
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY
+          region=us-chicago-1
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          echo "$OCI_SSH_PUB_KEY" > ~/.oci/ssh_key.pub
+          chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+
+      - name: Try Creating ARM Instance
+        env:
+          COMP_ID: ${{ secrets.OCI_TENANCY }}
+        run: |
+          # Stop automatically if the instance was already created
+          EXISTING=$(oci compute instance list --compartment-id "$COMP_ID" --display-name "karyon-arm-vps" --query "data[?\"lifecycle-state\"!='TERMINATED'].id | [0]" --raw-output)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            echo "SUCCESS: karyon-arm-vps already exists ($EXISTING). You can disable this workflow now!"
+            exit 0
+          fi
+
+          SUBNET_ID=$(oci network subnet list --compartment-id "$COMP_ID" --query "data[0].id" --raw-output)
+          IMAGE_ID=$(oci compute image list --compartment-id "$COMP_ID" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --shape "VM.Standard.A1.Flex" --sort-by TIMECREATED --sort-order DESC --query "data[0].id" --raw-output)
+
+          ADS=("fGQA:US-CHICAGO-1-AD-1" "fGQA:US-CHICAGO-1-AD-2" "fGQA:US-CHICAGO-1-AD-3")
+
+          for AD in "${ADS[@]}"; do
+            echo "Trying $AD..."
+            OUTPUT=$(oci compute instance launch \
+              --compartment-id "$COMP_ID" \
+              --availability-domain "$AD" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus": 1, "memoryInGBs": 6}' \
+              --display-name "karyon-arm-vps" \
+              --image-id "$IMAGE_ID" \
+              --subnet-id "$SUBNET_ID" \
+              --assign-public-ip true \
+              --boot-volume-size-in-gbs 150 \
+              --ssh-authorized-keys-file ~/.oci/ssh_key.pub 2>&1)
+
+            if echo "$OUTPUT" | grep -q '"lifecycle-state"'; then
+              echo "SUCCESS! Instance created in $AD!"
+              exit 0
+            else
+              echo "Failed in $AD: $(echo "$OUTPUT" | grep -iE 'message|code' | head -n 2)"
+            fi
+            sleep 5
+          done
