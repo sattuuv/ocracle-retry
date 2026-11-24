@@ -37,6 +37,7 @@ jobs:
         env:
           COMP_ID: ${{ secrets.OCI_TENANCY }}
         run: |
+          set +e
           # Stop automatically if the instance was already created
           EXISTING=$(oci compute instance list --compartment-id "$COMP_ID" --display-name "karyon-arm-vps" --query "data[?\"lifecycle-state\"!='TERMINATED'].id | [0]" --raw-output)
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
