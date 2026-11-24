@@ -2,8 +2,8 @@ name: OCI ARM Auto-Retry
 
 on:
   schedule:
-    - cron: '*/10 * * * *' # Runs every 30 minutes (change 30 to 10 if repo is Public)
-  workflow_dispatch:       # Lets you test it manually anytime
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
 jobs:
   launch-instance:
@@ -38,7 +38,6 @@ jobs:
           COMP_ID: ${{ secrets.OCI_TENANCY }}
         run: |
           set +e
-          # Stop automatically if the instance was already created
           EXISTING=$(oci compute instance list --compartment-id "$COMP_ID" --display-name "karyon-arm-vps" --query "data[?\"lifecycle-state\"!='TERMINATED'].id | [0]" --raw-output)
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
             echo "SUCCESS: karyon-arm-vps already exists ($EXISTING). You can disable this workflow now!"
