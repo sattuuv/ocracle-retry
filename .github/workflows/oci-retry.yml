@@ -1,17 +1,24 @@
 name: OCI ARM Auto-Retry
 
 on:
+  schedule:
+    - cron: "*/10 * * * *"
   workflow_dispatch:
-  repository_dispatch:
-    types: [retry-oci]
 
 permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: oci-retry
+  cancel-in-progress: false
+
 jobs:
   launch-instance:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
     steps:
       - name: Install OCI CLI
         run: pip install --quiet oci-cli
@@ -33,8 +40,8 @@ jobs:
           region=us-chicago-1
           key_file=$HOME/.oci/oci_api_key.pem
           EOF
-          echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
-          echo "$OCI_SSH_PUB_KEY" > ~/.oci/ssh_key.pub
+          printf '%s\n' "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          printf '%s\n' "$OCI_SSH_PUB_KEY" > ~/.oci/ssh_key.pub
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
 
       - name: Try Creating ARM Instance
@@ -43,17 +50,31 @@ jobs:
           COMP_ID: ${{ secrets.OCI_TENANCY }}
         run: |
           set +e
-          EXISTING=$(oci compute instance list --compartment-id "$COMP_ID" --display-name "karyon-arm-vps" --query "data[?\"lifecycle-state\"!='TERMINATED'].id | [0]" --raw-output)
+
+          EXISTING=$(oci compute instance list --compartment-id "$COMP_ID" \
+            --display-name "karyon-arm-vps" \
+            --query 'data[?"lifecycle-state"!=`TERMINATED`].id | [0]' --raw-output 2>/dev/null)
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
             echo "SUCCESS: karyon-arm-vps already exists ($EXISTING)."
             echo "found=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          SUBNET_ID=$(oci network subnet list --compartment-id "$COMP_ID" --query "data[0].id" --raw-output)
-          IMAGE_ID=$(oci compute image list --compartment-id "$COMP_ID" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --shape "VM.Standard.A1.Flex" --sort-by TIMECREATED --sort-order DESC --query "data[0].id" --raw-output)
+          SUBNET_ID=$(oci network subnet list --compartment-id "$COMP_ID" \
+            --query 'data[?"prohibit-public-ip-on-vnic"==`false`].id | [0]' --raw-output)
+          IMAGE_ID=$(oci compute image list --compartment-id "$COMP_ID" \
+            --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
+            --shape "VM.Standard.A1.Flex" --sort-by TIMECREATED --sort-order DESC \
+            --query "data[0].id" --raw-output)
 
-          ADS=("fGQA:US-CHICAGO-1-AD-1" "fGQA:US-CHICAGO-1-AD-2" "fGQA:US-CHICAGO-1-AD-3")
+          if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "null" ] || [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
+            echo "Could not find a public subnet or image. Check VCN/subnet and credentials."
+            echo "SUBNET_ID=$SUBNET_ID IMAGE_ID=$IMAGE_ID"
+            exit 1
+          fi
+
+          mapfile -t ADS < <(oci iam availability-domain list --compartment-id "$COMP_ID" --query 'data[].name' | jq -r '.[]')
+          echo "Availability domains: ${ADS[*]}"
 
           for AD in "${ADS[@]}"; do
             echo "Trying $AD..."
@@ -66,26 +87,30 @@ jobs:
               --image-id "$IMAGE_ID" \
               --subnet-id "$SUBNET_ID" \
               --assign-public-ip true \
-              --boot-volume-size-in-gbs 150 \
+              --boot-volume-size-in-gbs 100 \
               --ssh-authorized-keys-file ~/.oci/ssh_key.pub 2>&1)
 
             if echo "$OUTPUT" | grep -q '"lifecycle-state"'; then
               echo "SUCCESS! Instance created in $AD!"
               echo "found=true" >> "$GITHUB_OUTPUT"
               exit 0
+            elif echo "$OUTPUT" | grep -qi "out of host capacity\|out of capacity"; then
+              echo "Out of capacity in $AD."
+            elif echo "$OUTPUT" | grep -qi "TooManyRequests"; then
+              echo "Rate limited, will retry next run."
+              break
             else
-              echo "Failed in $AD: $(echo "$OUTPUT" | grep -iE 'message|code' | head -n 2)"
+              echo "Unexpected error in $AD:"
+              echo "$OUTPUT"
+              exit 1
             fi
             sleep 5
           done
           echo "found=false" >> "$GITHUB_OUTPUT"
 
-      - name: Schedule Next Run in 10 Minutes
-        if: steps.try_launch.outputs.found != 'true'
+      - name: Disable workflow after success
+        if: steps.try_launch.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          echo "Waiting 10 minutes before triggering next run..."
-          sleep 600
-          gh api "repos/$REPO/dispatches" -f event_type="retry-oci"
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow disable "${{ github.workflow }}"
