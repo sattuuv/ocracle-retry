@@ -2,7 +2,7 @@ name: OCI ARM Auto-Retry
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "3,23,43 * * * *"   # backup trigger only
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   launch-instance:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
     steps:
@@ -114,3 +114,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: gh workflow disable "${{ github.workflow }}"
+
+      - name: Wait, then trigger the next run
+        if: steps.try_launch.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "Not created yet. Waiting 8 minutes, then starting the next run..."
+          sleep 480
+          gh workflow run oci-retry.yml --ref main
